@@ -8,6 +8,8 @@
   #define LED_BUILTIN 8  // Built-in LED on ESP32-C3
 #endif
 
+WebServer httpServer(80);
+
 // ---------- WIFI AP MODE ----------
 const char *ssidWifiAP = "ESP32";
 const char *passwordWifiAP = "12345678";
@@ -35,35 +37,276 @@ const int pwmFreq = 25000;
 const int pwmResolution = 8;
 
 // ---------- WEB ----------
-WebServer httpServer(80);
-
 const char *indexPage = R"rawliteral(
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="utf-8" />
     <title>ESP32 Fan Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { font-family: system-ui; text-align:center; }
-      input[type=range] { width:80%; }
+      body {
+        font-family: system-ui;
+        text-align: center;
+        background: #f0f0f0;
+      }
+      .knob-container {
+        position: relative;
+        width: 200px;
+        height: 200px;
+        margin: 20px auto;
+      }
+      .knob {
+        width: 200px;
+        height: 200px;
+        border-radius: 50%;
+        background: #000;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+        position: relative;
+        cursor: grab;
+        user-select: none;
+        -webkit-user-select: none;
+        overflow: hidden;
+      }
+      .knob:active {
+        cursor: grabbing;
+      }
+      .knob::before {
+        content: "";
+        position: absolute;
+        width: 200%;
+        height: 200%;
+        left: 50%;
+        top: 50%;
+        transform: translate(-25%, -50%);
+        border-radius: 50%;
+        background: conic-gradient(
+          from 180deg,
+          #4caf50 0%,
+          #8bc34a 25%,
+          #2196f3 50%,
+          #9c27b0 75%,
+          #4caf50 100%
+        );
+        mask: radial-gradient(
+          circle at 25% 50%,
+          transparent 62%,
+          black 65%,
+          black 70%,
+          transparent 73%
+        );
+        -webkit-mask: radial-gradient(
+          circle at 25% 50%,
+          transparent 62%,
+          black 65%,
+          black 70%,
+          transparent 73%
+        );
+      }
+      .indicator {
+        position: absolute;
+        width: 6px;
+        height: 50px;
+        background: #fff;
+        left: 50%;
+        bottom: 50%;
+        transform: translateX(-50%);
+        border-radius: 3px;
+        transform-origin: bottom center;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+      }
+      .indicator::after {
+        content: "";
+        position: absolute;
+        width: 16px;
+        height: 16px;
+        background: #fff;
+        border-radius: 50%;
+        left: 50%;
+        bottom: -8px;
+        transform: translateX(-50%);
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+      }
+      .value-display {
+        position: absolute;
+        top: 65%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 2em;
+        font-weight: bold;
+        color: #0f0;
+        text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.1);
+      }
+      .rpm-display {
+        position: absolute;
+        top: 85%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 1.2em;
+        color: #0f0;
+        text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.1);
+      }
+      .speed-buttons {
+        margin-top: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        align-items: center;
+      }
+      .speed-buttons .row {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+      }
+      .speed-buttons button {
+        padding: 10px 20px;
+        font-size: 1.1em;
+        border: none;
+        border-radius: 5px;
+        background: #2196f3;
+        color: white;
+        cursor: pointer;
+        transition: background 0.3s;
+        min-width: 100px;
+      }
+      .speed-buttons button:hover {
+        background: #1976d2;
+      }
     </style>
   </head>
   <body>
-    <h1>Fan Speed: <span id="rpm">0</span> RPM</h1>
-    <input type="range" id="slider" min="0" max="100" value="0" onchange="setSpeed(this.value)">
-    <p><span id="percent">0</span>%</p>
+    <div class="knob-container">
+      <div class="knob" id="knob">
+        <div class="indicator"></div>
+      </div>
+      <div class="value-display"><span id="percent">0</span>%</div>
+      <div class="rpm-display"><span id="rpm">0</span> RPM</div>
+    </div>
+    <div class="speed-buttons">
+      <button onclick="setSpeed(0)">0%</button>
+      <button onclick="setSpeed(100)">100%</button>
+      <button onclick="setSpeed(25)">25%</button>
+      <button onclick="setSpeed(50)">50%</button>
+      <button onclick="setSpeed(75)">75%</button>
+    </div>
     <script>
+      const knob = document.querySelector(".knob");
+      const indicator = document.querySelector(".indicator");
+      let isDragging = false;
+      let startAngle = 0;
+      let currentRotation = -90;
+      let lastRotation = -90;
+
+      const MIN_ROTATION = -90; // Góc bắt đầu
+      const MAX_ROTATION = 180; // Góc tối đa (270 độ từ min)
+
+      function getAngle(event, element) {
+        const rect = element.getBoundingClientRect();
+        const center = {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+        return (
+          (Math.atan2(event.clientY - center.y, event.clientX - center.x) *
+            180) /
+          Math.PI
+        );
+      }
+
+      function updateKnob(rotation) {
+        // Giới hạn góc xoay
+        rotation = Math.max(MIN_ROTATION, Math.min(MAX_ROTATION, rotation));
+
+        // Cập nhật giao diện
+        indicator.style.transform = `rotate(${rotation}deg)`;
+
+        // Tính giá trị speed (0-100%)
+        const range = MAX_ROTATION - MIN_ROTATION;
+        const speed = Math.round(((rotation - MIN_ROTATION) / range) * 100);
+        setSpeed(speed);
+
+        return rotation;
+      }
+
+      knob.addEventListener("mousedown", function (e) {
+        isDragging = true;
+        startAngle = getAngle(e, knob) - currentRotation;
+        knob.style.cursor = "grabbing";
+        e.preventDefault();
+      });
+
+      document.addEventListener("mousemove", function (e) {
+        if (!isDragging) return;
+
+        let rotation = getAngle(e, knob) - startAngle;
+
+        // Thêm "quán tính" cho cảm giác mượt mà hơn
+        rotation = lastRotation + (rotation - lastRotation) * 0.7;
+
+        currentRotation = updateKnob(rotation);
+        lastRotation = currentRotation;
+      });
+
+      document.addEventListener("mouseup", function () {
+        if (isDragging) {
+          isDragging = false;
+          knob.style.cursor = "grab";
+          lastRotation = currentRotation;
+        }
+      });
+
+      // Hỗ trợ touch events
+      knob.addEventListener("touchstart", function (e) {
+        isDragging = true;
+        startAngle = getAngle(e.touches[0], knob) - currentRotation;
+        e.preventDefault();
+      });
+
+      document.addEventListener("touchmove", function (e) {
+        if (!isDragging) return;
+
+        let rotation = getAngle(e.touches[0], knob) - startAngle;
+        rotation = lastRotation + (rotation - lastRotation) * 0.7;
+
+        currentRotation = updateKnob(rotation);
+        lastRotation = currentRotation;
+
+        e.preventDefault();
+      });
+
+      document.addEventListener("touchend", function () {
+        if (isDragging) {
+          isDragging = false;
+          lastRotation = currentRotation;
+        }
+      });
+
       async function refresh() {
-        let r = await fetch("/getspeed");
-        let t = await r.text();
-        let [rpm, s] = t.split(",");
-        document.querySelector("#rpm").innerText = rpm;
-        document.querySelector("#percent").innerText = s;
-        document.querySelector("#slider").value = s;
+        try {
+          let r = await fetch("/getspeed");
+          let t = await r.text();
+          let [rpm, s] = t.split(",");
+          document.querySelector("#rpm").innerText = rpm;
+          document.querySelector("#percent").innerText = s;
+          // Cập nhật góc xoay của núm
+          const speed = parseInt(s);
+          const rotation =
+            MIN_ROTATION + ((MAX_ROTATION - MIN_ROTATION) * speed) / 100;
+          currentRotation = rotation;
+          lastRotation = rotation;
+          indicator.style.transform = `rotate(${rotation}deg)`;
+        } catch (e) {
+          console.log("Lỗi kết nối:", e);
+        }
         setTimeout(refresh, 1000);
       }
-      async function setSpeed(v){ await fetch("/setspeed?speed="+v); }
+
+      async function setSpeed(v) {
+        v = Math.max(0, Math.min(100, v)); // Giới hạn giá trị từ 0-100
+        document.querySelector("#percent").innerText = v;
+        await fetch("/setspeed?speed=" + v);
+      }
+
       window.onload = refresh;
     </script>
   </body>
@@ -206,7 +449,7 @@ void setup() {
   httpServer.on("/setspeed", handleSetSpeed);
   httpServer.on("/setwifi", handleSetWifi);
   httpServer.on("/update", HTTP_GET, handleUpdate);
-  httpServer.on("/update", HTTP_POST, []() {
+  httpServer.on("/update", HTTP_POST, [&httpServer]() {
     httpServer.sendHeader("Connection", "close");
     httpServer.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
     ESP.restart();
